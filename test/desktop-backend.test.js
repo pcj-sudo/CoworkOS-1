@@ -29,7 +29,8 @@ test("a packaged backend preserves an explicit CAD runtime instead of replacing 
     `
     process.send({type:"dashboard.ready", url:"http://127.0.0.1:"+process.env.COWORK_UI_PORT});
     process.on("message", message => {
-      if(message.type === "probe-component") process.send({type:"component-env", python:process.env.COWORK_CADQUERY_PYTHON});
+      if(message.type === "probe-component") process.send({type:"component-env", python:process.env.COWORK_CADQUERY_PYTHON,
+        hermesUrl:process.env.COWORK_HERMES_URL, hermesKey:process.env.COWORK_HERMES_API_KEY});
     });
     process.on("SIGTERM", () => process.exit(0));
   `
@@ -39,14 +40,23 @@ test("a packaged backend preserves an explicit CAD runtime instead of replacing 
   const previous = process.env.COWORK_CADQUERY_PYTHON;
   try {
     process.env.COWORK_CADQUERY_PYTHON = external;
-    backend = await startBackend(paths, {}, process.execPath);
+    backend = await startBackend(paths, {}, process.execPath, {
+      ...process.env,
+      COWORK_HERMES_URL: "http://127.0.0.1:12345",
+      COWORK_HERMES_API_KEY: "host-fixture-key"
+    });
   } finally {
     if (previous === undefined) delete process.env.COWORK_CADQUERY_PYTHON;
     else process.env.COWORK_CADQUERY_PYTHON = previous;
   }
   const reply = once(backend.child, "message");
   backend.child.send({ type: "probe-component" });
-  assert.deepEqual((await reply)[0], { type: "component-env", python: external });
+  assert.deepEqual((await reply)[0], {
+    type: "component-env",
+    python: external,
+    hermesUrl: "http://127.0.0.1:12345",
+    hermesKey: "host-fixture-key"
+  });
 });
 
 test(

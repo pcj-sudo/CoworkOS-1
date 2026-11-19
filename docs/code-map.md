@@ -370,3 +370,7 @@ App/Web 界面语言由 [轻量文案模块](../web/assets/ui/language.js)、[�
 通过 npm 首次安装桌面 App 由[桌面安装器](../scripts/desktop.mjs)负责，复用[受管安装器](../desktop/update-install.cjs)校验应用；[安装回归](../test/desktop-cli-install.test.js)覆盖下载、平台门槛、取消与安装冲突。[CLI 打包](../scripts/package-cli.mjs)区分 npm 包 `coworkos-app` 与旧发行包的命令归属，两者均提供 `coworkos` 命令。
 
 原生子 Agent 接入由 [Backend 合同](../src/runtime/subagent-backend.ts) 与 [执行边界](../src/runtime/subagent-backend-runner.ts) 定义，Coordinator 保留调度，Pi [协调工具](../.pi/runtime/tools/coordination.ts) 负责发现与选择。行为和限制见 [接入说明](subagent-backends.md)，回归见 [backend tests](../test/subagent-backend.test.js)。
+
+[Hermes 适配器](../src/runtime/subagent-backends/hermes.ts) 通过原生 Runs API 执行，[配置装配](../src/runtime/subagent-backends/configured.ts) 由 Pi 入口调用；[安装与限制](hermes-subagent.md)、[协议回归](../test/hermes-backend.test.js) 和 [真实运行时回归](../test/hermes-native.test.js) 分别维护。
+
+桌面可按用户数据目录中的 `hermes-runtime.json` 启停独立安装的本机 Hermes；进程所有权、API 就绪与连接注入归 [桌面生命周期](../desktop/hermes-runtime.cjs)，不扩展 Backend 最小合同。验证 [启停与失败清理](../test/desktop-hermes-runtime.test.js) 和 [后端连接环境](../test/desktop-backend.test.js)。

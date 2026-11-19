@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { configuredSubagentBackends } from "../../dist/src/runtime/subagent-backends/configured.js";
 import { CoordinatorRuntime } from "../../dist/src/runtime/coordinator-runtime.js";
 import { experimentDigest } from "../../dist/src/runtime/experiment-digest.js";
 import { ExperimentProgramStore } from "../../dist/src/runtime/experiment-program-store.js";
@@ -248,7 +249,7 @@ export default async function registerCoworkExtension(pi: ExtensionAPI) {
             pi.sendMessage(message, awaitingInitialPrompt ? { ...options, triggerTurn: false } : options),
           { includeFollowUps }
         );
-  const coordinator = new CoordinatorRuntime();
+  const coordinator = new CoordinatorRuntime({ backends: configuredSubagentBackends(runtimeEnv) });
   const watchStore = new WatchProgramStore(workspaceRoot);
   const experimentStore = new ExperimentProgramStore(workspaceRoot);
   const virtualAgentStore = new VirtualAgentStore(workspaceRoot);

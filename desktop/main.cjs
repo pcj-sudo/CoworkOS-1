@@ -44,6 +44,7 @@ const { createComposerDraftStore } = require("./composer-drafts.cjs");
 const { installEditContextMenu } = require("./edit-context-menu.cjs");
 const { connectRenderer } = require("./renderer-connection.cjs");
 const { startBackend } = require("./backend.cjs");
+const { startManagedHermes } = require("./hermes-runtime.cjs");
 const { desktopProfile } = require("./profile.cjs");
 const { createDesktopSpeechInput } = require("./speech-input.cjs");
 const { createHarnessTiling } = require("./harness-tiling.cjs");
@@ -65,6 +66,7 @@ const profile = desktopProfile({
 });
 
 let backend,
+  hermesRuntime,
   mainWindow,
   settings,
   webSearchSettings,
@@ -129,8 +131,21 @@ function openExternalLink(url) {
     .catch(() => dialog.showErrorBox("无法打开链接", "请复制链接后在浏览器中打开。"));
 }
 async function launchBackend() {
+  if (!hermesRuntime) {
+    try {
+      hermesRuntime = await startManagedHermes(paths);
+    } catch (error) {
+      dialog.showErrorBox("Hermes 未连接", error.message);
+      hermesRuntime = { env: {}, stop: async () => {} };
+    }
+  }
   // An unavailable old secret must leave the settings UI reachable for replacement.
-  backend = await startBackend(paths, await settings.read({ allowUnavailableSecret: true }));
+  backend = await startBackend(
+    paths,
+    await settings.read({ allowUnavailableSecret: true }),
+    process.execPath,
+    { ...process.env, ...hermesRuntime.env }
+  );
   await syncComponentAuth(backend, componentAuth, process.env.ATRIA_COMPONENTS_RELEASE_ROOT);
   if (closing || quitting) return;
   const current = backend;
@@ -395,6 +410,8 @@ async function initializeUpdates(userData) {
         await prepareDesktopChange({ backend, documents, action: "更新 CoworkOS" });
         updateStoppedBackend = true;
         await backend.stop();
+        await hermesRuntime?.stop();
+        hermesRuntime = undefined;
       } catch (error) {
         restarting = false;
         throw error;
@@ -562,6 +579,7 @@ app.on("before-quit", (event) => {
     await restartPromise;
     await updates?.dispose();
     await backend?.stop();
+    await hermesRuntime?.stop();
     await speechInput.dispose();
     await credentialStorage.close?.();
     quitting = true;

@@ -16,12 +16,12 @@ async function availablePort() {
   return port;
 }
 /** Readiness comes from our child via IPC, never from an arbitrary process on a fixed port. */
-async function startBackend(paths, settings, executable = process.execPath) {
+async function startBackend(paths, settings, executable = process.execPath, environment = process.env) {
   const { visionModelEnv } = await import("../dist/src/runtime/vision-config.js");
   const visionEnv = visionModelEnv(settings, {});
   const port = await availablePort();
   const token = crypto.randomBytes(32).toString("hex");
-  const inheritedEnv = desktopBackendEnvironment();
+  const inheritedEnv = desktopBackendEnvironment(environment);
   delete inheritedEnv.ATRIA_COMPONENTS_GITHUB_TOKEN;
   const child = spawn(
     backendExecutable(executable, process.platform, paths.appRoot),
@@ -56,9 +56,12 @@ async function startBackend(paths, settings, executable = process.execPath) {
     }
   );
   const log = fs.createWriteStream(path.join(paths.logs, "dashboard.log"), { flags: "a", mode: 0o600 });
-  const secrets = [settings.apiKey, visionEnv.COWORK_VISION_API_KEY, settings.webSearch?.exaApiKey].filter(
-    Boolean
-  );
+  const secrets = [
+    settings.apiKey,
+    visionEnv.COWORK_VISION_API_KEY,
+    settings.webSearch?.exaApiKey,
+    inheritedEnv.COWORK_HERMES_API_KEY
+  ].filter(Boolean);
   const record = (chunk) =>
     log.write(
       [...secrets, ...authSecrets].reduce(

@@ -16,7 +16,7 @@ const coordinator = new CoordinatorRuntime({ backends: [backend] });
 
 `run` receives a unique `callId` and task text containing the objective, constraints and expected evidence. It must wait for this delegation's report; returning only an acceptance receipt or native task ID does not fulfill the contract. `completed` means the agent returned a usable report; Main still judges business acceptance. `failed` means it could not deliver; `unknown` means the outcome cannot be established. The summary must be nonempty. Optional references and artifact locations must be usable and contain no secrets.
 
-`context`, `inputs`, and `workingDirectory` are optional contract fields for adapters that need them. The current Main tool passes task text only: Main must include relevant context in that text. CoworkOS does not impose a workspace on a native harness. Native artifacts are reported as references; they are not copied, downloaded, or promoted to accepted Task artifacts automatically.
+`context`, `inputs`, and `workingDirectory` are optional contract fields for adapters that need them. The current Main tool passes task text only: Main must include relevant context in that text. CoworkOS does not impose a workspace on a native harness. The legacy dispatch result’s `workingDirectory` identifies CoworkOS’s local bookkeeping directory for this call, not the native agent’s execution directory. Native artifacts are reported as references; they are not copied, downloaded, or promoted to accepted Task artifacts automatically.
 
 Optional `onProgress` and `onReference` callbacks expose authorized observations. Adapters may ignore them. Optional `check`, description and tags aid discovery. The interface also reserves an optional `askMain` callback, but the current execution host does not supply it: synchronous Main waiting and structured question fallback need further design. There is no required cancel, resume, messaging, file-transfer, or installation API.
 
@@ -33,3 +33,5 @@ The minimal external path rejects CoworkOS resource/attachment delegation, follo
 ## Validation
 
 [Backend regressions](../test/subagent-backend.test.js) cover run-only registration, execution without Main credentials, result/callback attribution, duplicate dispatch, failure/unknown, lost-owner recovery and unsupported controls. Existing actual Pi protocol, message, question and cancellation tests cover default-runtime compatibility. Native adapters require separate real-runtime testing; a protocol fixture alone does not establish a working native installation.
+
+The first native adapter is [Hermes Agent](hermes-subagent.md), enabled explicitly in Pi host assembly with `COWORK_HERMES_URL` and `COWORK_HERMES_API_KEY`. These can come from the launch environment or the optional desktop-managed service. Hermes remains independently installed; host process management is separate from this backend contract.
