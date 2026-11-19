@@ -31,6 +31,17 @@ import { delegationRenderers } from "../cli-ui.ts";
 /** coordination tools depend only on explicit runtime ports. */
 export function registerCoordinationTools(pi: ExtensionAPI, context: CoworkToolContext) {
   pi.registerTool({
+    name: "list_subagent_backends",
+    label: "List Subagent Backends",
+    description:
+      "Discover configured native agent backends before selecting backendId in call_subagent. External agents use their own tools and credentials; progress, interaction and cancellation are optional.",
+    parameters: Type.Object({}),
+    async execute(): Promise<RuntimeToolResult> {
+      const backends = context.coordinator.listBackends();
+      return { content: [{ type: "text", text: JSON.stringify(backends) }], details: { backends } };
+    }
+  });
+  pi.registerTool({
     name: "askhuman",
     label: "Ask Human",
     description:
@@ -319,6 +330,12 @@ export function registerCoordinationTools(pi: ExtensionAPI, context: CoworkToolC
     ],
     parameters: Type.Object(
       {
+        backendId: Type.Optional(
+          Type.String({
+            description:
+              "A configured id from list_subagent_backends. Omit for internal Pi. External backends use native tools; resources/attachments and follow-up/cancel are not supported by the minimal adapter."
+          })
+        ),
         task: Type.String({
           description:
             "A concrete objective for one Subagent with relevant context, scope, constraints and acceptance evidence. A substantial independent end-to-end attempt is valid. The summary returns conclusions, candidate output paths and validation evidence."
@@ -356,7 +373,19 @@ export function registerCoordinationTools(pi: ExtensionAPI, context: CoworkToolC
     executionMode: "parallel",
     ...delegationRenderers(() => context.cliDebugEnabled()),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx): Promise<RuntimeToolResult> {
-      if (!context.baseUrl || !context.apiKey)
+      const backendId = typeof params.backendId === "string" ? params.backendId : "pi";
+      const external = backendId !== "pi";
+      if (!context.coordinator.listBackends().some((backend) => backend.id === backendId))
+        throw new Error(`Unknown subagent backend: ${backendId}`);
+      if (
+        external &&
+        ((Array.isArray(params.resources) && params.resources.length) ||
+          (Array.isArray(params.attachments) && params.attachments.length))
+      )
+        throw new Error(
+          "External backends do not support CoworkOS resources/attachments; put authorized native inputs in the task"
+        );
+      if (!external && (!context.baseUrl || !context.apiKey))
         throw new Error("Cowork requires COWORK_API_BASE/COWORK_API_KEY or .cowork/config.json");
       const goal = String(params.task ?? "").trim();
       if (!goal) throw new Error("call_subagent requires task");
@@ -379,6 +408,7 @@ export function registerCoordinationTools(pi: ExtensionAPI, context: CoworkToolC
         callId,
         agentId,
         task: goal,
+        backendId,
         mode: params.mode,
         workspaceRoot: context.workspaceRoot,
         projectDirectory: context.projectDirectory,
@@ -454,6 +484,7 @@ export function registerCoordinationTools(pi: ExtensionAPI, context: CoworkToolC
           agentId: result.agentId,
           name,
           status: result.status,
+          backendResult: result.backendResult,
           response: result.response,
           artifacts: result.artifacts.map((artifact) => artifact.relativePath),
           outputFiles: result.outputFiles ?? [],

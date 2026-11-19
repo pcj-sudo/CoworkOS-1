@@ -15,6 +15,7 @@ export const CORE_TOOLS = [
   "list_images",
   "browse_workspace",
   "call_subagent",
+  "list_subagent_backends",
   "send_subagent_message",
   "cancel_subagent",
   "get_subagent_status",

@@ -92,3 +92,5 @@ Composer Session 按会话保存草稿与已验证附件，发送捕获原 Task�
 - App 的目标平台为 Apple Silicon Mac；Windows/Linux GUI 驱动、远程 Worker、多用户隔离和无人值守更新尚未交付。
 
 修改接口时同步生产者和消费者、兼容/恢复文档与行为测试。主责角色见 [所有权表](module-ownership.md)，PR 规则见 [CONTRIBUTING](../CONTRIBUTING.md)，公开发布门槛见 [贡献约定](../CONTRIBUTING.md#pr审阅与发布) 和 [Mac 发布指南](mac-release.md)。
+
+原生外部子 Agent 经 [Backend 接口](subagent-backends.md) 接入 Coordinator：`id`、`name`、`run` 是最小要求。Main 用 `list_subagent_backends` 发现并通过 `call_subagent.backendId` 选择。省略时仍使用内部 Pi。外部工具、记忆和工作区由原生运行时管理；调度和 Inbox 回传沿用 CoworkOS。取消、消息和恢复不是必选能力；中断结果不明时不会自动重跑。

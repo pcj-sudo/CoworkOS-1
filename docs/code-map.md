@@ -368,3 +368,5 @@ Node 测试的递归发现由 [日常测试入口](../scripts/test.mjs) 的 `dis
 App/Web 界面语言由 [轻量文案模块](../web/assets/ui/language.js)、[英文文案表](../web/assets/ui/language-en.js) 与 [设置控制器](../web/assets/controllers/language-settings.js) 负责；只翻译源码字面量，不处理插值的用户内容，不监听 DOM 变化。静态页面在渲染用户内容前翻译一次，英文文案表仅英文会话加载。切换复用 `web/app.js` 的文档与草稿保存门槛后刷新。[桌面语言偏好](../desktop/language.cjs) 通过可信主窗口 IPC 独立持久化。验证 [语言行为](../test/language.test.js)、[桌面持久化与信任边界](../test/desktop-language.test.js) 和 [浏览器切换、草稿与设置导航](../e2e/language-settings.spec.js)，同步 [语言配置](configuration-reference.md#界面语言)。
 
 通过 npm 首次安装桌面 App 由[桌面安装器](../scripts/desktop.mjs)负责，复用[受管安装器](../desktop/update-install.cjs)校验应用；[安装回归](../test/desktop-cli-install.test.js)覆盖下载、平台门槛、取消与安装冲突。[CLI 打包](../scripts/package-cli.mjs)区分 npm 包 `coworkos-app` 与旧发行包的命令归属，两者均提供 `coworkos` 命令。
+
+原生子 Agent 接入由 [Backend 合同](../src/runtime/subagent-backend.ts) 与 [执行边界](../src/runtime/subagent-backend-runner.ts) 定义，Coordinator 保留调度，Pi [协调工具](../.pi/runtime/tools/coordination.ts) 负责发现与选择。行为和限制见 [接入说明](subagent-backends.md)，回归见 [backend tests](../test/subagent-backend.test.js)。

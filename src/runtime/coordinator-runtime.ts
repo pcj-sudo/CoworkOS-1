@@ -42,6 +42,8 @@ import { readRunMetrics } from "./experiment-metrics.js";
 import type { ExperimentRunStatus } from "../domain/experiment.js";
 import type { VisionModelConfig } from "../tools/vision-model.js";
 import { subagentRecoverySummary } from "./subagent-recovery-summary.js";
+import type { AgentBackend, AgentResult as NativeAgentResult } from "./subagent-backend.js";
+import { runNativeBackend, saveBackendRecord } from "./subagent-backend-runner.js";
 import { subagentCallStatuses, type SubagentCallStatus } from "./subagent-call-status.js";
 
 type DelegatedModelSettings = Pick<
@@ -58,6 +60,8 @@ type DelegatedModelSettings = Pick<
 >;
 
 export interface SubagentDispatchInput extends DelegatedModelSettings {
+  /** Omit or pi for the existing internal runtime. Other ids use native tools. */
+  backendId?: string;
   visionModel?: VisionModelConfig;
   thinkingLevel?: PiThinkingLevel;
   api?: CoworkModelApi;
@@ -81,8 +85,8 @@ export interface SubagentDispatchInput extends DelegatedModelSettings {
   mode: CallMode;
   workspaceRoot: string;
   projectDirectory?: string;
-  baseUrl: string;
-  apiKey: string;
+  baseUrl?: string;
+  apiKey?: string;
   model?: string;
   context?: unknown[];
   maxAttempts?: number;
@@ -124,6 +128,8 @@ export interface SubagentDispatchResult {
   runId: string;
   agentId: string;
   name?: string;
+  /** External report; unknown is a terminal orchestration failure, never success. */
+  backendResult?: NativeAgentResult;
   status: "succeeded" | "failed" | "timed_out" | "cancelled";
   response: string;
   workingDirectory: string;
@@ -261,6 +267,41 @@ export interface CoordinatorRecoveryInput extends DelegatedModelSettings {
  * durable call lifecycle, isolated workspace, execution and result recording.
  */
 export class CoordinatorRuntime {
+  private readonly backends: ReadonlyMap<string, AgentBackend>;
+
+  constructor(options: { backends?: readonly AgentBackend[] } = {}) {
+    const backends = new Map<string, AgentBackend>();
+    for (const backend of options.backends ?? []) {
+      if (
+        !/^[a-z][a-z0-9_-]*$/.test(backend.id) ||
+        backend.id === "pi" ||
+        !backend.name.trim() ||
+        typeof backend.run !== "function" ||
+        backends.has(backend.id)
+      )
+        throw new Error(`Invalid or duplicate subagent backend: ${backend.id}`);
+      backends.set(backend.id, backend);
+    }
+    this.backends = backends;
+  }
+
+  listBackends() {
+    return [
+      {
+        id: "pi",
+        name: "CoworkOS Pi",
+        description: "Internal tools and delegated application capabilities",
+        tags: [] as string[]
+      },
+      ...[...this.backends.values()].map(({ id, name, description, tags }) => ({
+        id,
+        name,
+        description,
+        tags: tags ?? []
+      }))
+    ];
+  }
+
   private readonly activeSubagents = new Map<string, { session: PiSession; cancelRequested: boolean }>();
   private readonly cancelRequests = new Set<string>();
 
@@ -422,6 +463,8 @@ export class CoordinatorRuntime {
     if (!item) throw new Error(`unknown subagent call: ${input.callId}`);
     if (["completed", "failed", "cancelled"].includes(item.status))
       throw new Error(`subagent call ${input.callId} is already ${item.status}`);
+    if (isNativeWork(item.payload))
+      throw new Error("This external backend does not support follow-up messages");
     const message = input.message.trim();
     if (!message) throw new Error("message must not be empty");
     const messageId = id("subagent-message");
@@ -479,6 +522,7 @@ export class CoordinatorRuntime {
     if (!target) throw new Error(`unknown peer call: ${input.targetCallId}`);
     if (!["queued", "leased"].includes(target.status))
       throw new Error(`peer call ${input.targetCallId} is already ${target.status}`);
+    if (isNativeWork(target.payload)) throw new Error("This external backend does not support peer messages");
     const messageId = id("peer-message");
     const inbox = new InboxStore(
       join(
@@ -556,6 +600,10 @@ export class CoordinatorRuntime {
         previousStatus: item.status
       };
     }
+    if (isNativeWork(item.payload))
+      throw new Error(
+        "This external backend does not support cancellation; control it in its native runtime"
+      );
     this.cancelRequests.add(input.callId);
     const active = this.activeSubagents.get(input.callId);
     if (active) {
@@ -594,6 +642,7 @@ export class CoordinatorRuntime {
           taskId: input.taskId,
           runId: input.runId,
           activateRun: (item.payload as { activateRun?: boolean })?.activateRun,
+          backendId: (item.payload as { backendId?: string })?.backendId,
           callId: item.stepId,
           systemPrompt: (item.payload as { systemPrompt?: string })?.systemPrompt,
           disableTools: (item.payload as { disableTools?: boolean })?.disableTools,
@@ -655,6 +704,17 @@ export class CoordinatorRuntime {
   }
 
   async dispatch(input: SubagentDispatchInput): Promise<SubagentDispatchResult> {
+    const external = Boolean(input.backendId && input.backendId !== "pi");
+    if (external && input.signal?.aborted) throw new Error("Subagent dispatch was aborted before starting");
+    const backend = external ? this.backends.get(input.backendId!) : undefined;
+    if (external && !backend && !input.resume)
+      throw new Error(`Unknown subagent backend: ${input.backendId}`);
+    if (external && (input.capabilityGrants?.length || input.disableTools || input.systemPrompt))
+      throw new Error(
+        "External backends do not inherit CoworkOS application grants or internal role restrictions"
+      );
+    if (!external && (!input.baseUrl || !input.apiKey))
+      throw new Error("Internal Pi backend requires model credentials");
     const thinkingLevel = normalizeReasoningEffort(input.thinkingLevel ?? configuredReasoningEffort());
     const api = input.api ?? configuredModelApi();
     const thinkingFormat = input.thinkingFormat ?? configuredThinkingFormat();
@@ -710,6 +770,8 @@ export class CoordinatorRuntime {
       importance: call.importance,
       payload: {
         task: input.task,
+        backendId: input.backendId,
+        experimentRef: input.experimentRef,
         activateRun: input.activateRun,
         projectDirectory: input.projectDirectory,
         systemPrompt: input.systemPrompt,
@@ -721,7 +783,6 @@ export class CoordinatorRuntime {
         supportsPromptCacheKey,
         supportsImages,
         ...delegatedSettings(input),
-        experimentRef: input.experimentRef,
         capabilityGrants: input.capabilityGrants ?? [],
         skillRoots: input.skillRoots,
         skillApplications: input.skillApplications,
@@ -729,10 +790,11 @@ export class CoordinatorRuntime {
       },
       // A Task expecting expensive jobs grants one attempt, so a diverged
       // training run surfaces as evidence instead of being repeated silently.
-      maxAttempts:
-        input.maxAttempts ??
-        resolveCapabilities((await workspace.readTask(input.taskId).catch(() => undefined))?.capabilities)
-          .maxAttempts
+      maxAttempts: external
+        ? 1
+        : (input.maxAttempts ??
+          resolveCapabilities((await workspace.readTask(input.taskId).catch(() => undefined))?.capabilities)
+            .maxAttempts)
     });
     input.onQueued?.();
     const leaseMs = input.leaseMs ?? 60_000;
@@ -749,7 +811,7 @@ export class CoordinatorRuntime {
     await this.transition(events, input, call, "running");
     const workingDirectory = await workspace.prepareAgentWorkDir(input.taskId, input.runId, input.agentId);
     const tracePath = workspace.sessionPath(input.taskId, input.runId, input.agentId);
-    if (!shouldResume) {
+    if (!external && !shouldResume) {
       await saveCheckpoint({ messages: [], compaction: emptyCompaction(), status: "running" });
     }
     let session: PiSession | undefined;
@@ -760,6 +822,7 @@ export class CoordinatorRuntime {
       resultPath: `runs/${input.runId}/agents/subagents/${input.agentId}/result.json`
     };
     let sessionResult: PiSessionResult | undefined;
+    let backendResult: NativeAgentResult | undefined;
     let messagePoller: ReturnType<typeof setInterval> | undefined;
     const heartbeat = setInterval(
       () => {
@@ -771,256 +834,289 @@ export class CoordinatorRuntime {
       Math.max(1_000, Math.floor(leaseMs / 3))
     );
     try {
-      const grants = input.capabilityGrants ?? [];
-      if (grants.length && !input.capabilityProvider)
-        throw new Error("Delegated capabilities require a provider; refusing to drop the recorded grant");
-      const provided = grants.length
-        ? await input.capabilityProvider!(grants, {
+      let rawResponse: string;
+      if (external) {
+        await new JsonlEventStore(tracePath).append(
+          event(input, callId, "backend.started", input.agentId, { backendId: input.backendId })
+        );
+        backendResult = await runNativeBackend({
+          backend,
+          task: { callId, task: input.task },
+          interrupted: Boolean(input.resume || leased.attempts > 1),
+          referencePath: join(runPath, "agents", "subagents", input.agentId, "native-reference.json"),
+          resultPath: join(input.workspaceRoot, input.taskId, diagnostics.resultPath),
+          onProgress: async (message) => {
+            const progress = event(input, callId, "backend.progress", input.agentId, { message });
+            await this.append(events, progress);
+            await new JsonlEventStore(tracePath).append(progress);
+          }
+        });
+        await saveBackendRecord(
+          join(input.workspaceRoot, input.taskId, diagnostics.resultPath),
+          backendResult
+        );
+        await new JsonlEventStore(tracePath).append(
+          event(input, callId, "backend.result", input.agentId, backendResult)
+        );
+        rawResponse = JSON.stringify({ backendId: input.backendId, ...backendResult });
+        if (backendResult.status !== "completed") throw new Error(rawResponse);
+      } else {
+        const grants = input.capabilityGrants ?? [];
+        if (grants.length && !input.capabilityProvider)
+          throw new Error("Delegated capabilities require a provider; refusing to drop the recorded grant");
+        const provided = grants.length
+          ? await input.capabilityProvider!(grants, {
+              taskId: input.taskId,
+              runId: input.runId,
+              callId,
+              agentId: input.agentId,
+              workspaceRoot: input.workspaceRoot,
+              workingDirectory,
+              supportsImages
+            })
+          : undefined;
+        const skills = await discoverSkills(
+          [
+            ...(provided?.skillRoots ?? []),
+            ...(input.skillRoots ?? [join(process.cwd(), ".pi", "skills")]),
+            ...scienceSkillRoots(input.science)
+          ],
+          { applications: [...(input.skillApplications ?? []), ...(provided?.skillApplications ?? [])] }
+        );
+        // Capabilities are granted on the Task, so a Subagent inherits exactly
+        // what this Task was granted rather than whatever the process was told.
+        const capabilities = resolveCapabilities(
+          (await workspace.readTask(input.taskId).catch(() => undefined))?.capabilities
+        );
+        const baseTools = input.toolFactory
+          ? input.toolFactory(workingDirectory, join(input.workspaceRoot, input.taskId))
+          : createBuiltinTools({
+              rootDirectory: workingDirectory,
+              workspaceDirectory: join(input.workspaceRoot, input.taskId),
+              projectDirectory: input.projectDirectory,
+              capabilities,
+              supportsImages,
+              visionModel: input.visionModel,
+              web: input.web,
+              science: input.science
+            });
+        const tools = new Map(baseTools);
+        if (skills.length > 0) tools.set("load_skill", createLoadSkillTool(skills));
+        tools.set(
+          "send_peer_message",
+          this.createPeerMessageTool({
             taskId: input.taskId,
             runId: input.runId,
-            callId,
-            agentId: input.agentId,
             workspaceRoot: input.workspaceRoot,
-            workingDirectory,
-            supportsImages
-          })
-        : undefined;
-      const skills = await discoverSkills(
-        [
-          ...(provided?.skillRoots ?? []),
-          ...(input.skillRoots ?? [join(process.cwd(), ".pi", "skills")]),
-          ...scienceSkillRoots(input.science)
-        ],
-        { applications: [...(input.skillApplications ?? []), ...(provided?.skillApplications ?? [])] }
-      );
-      // Capabilities are granted on the Task, so a Subagent inherits exactly
-      // what this Task was granted rather than whatever the process was told.
-      const capabilities = resolveCapabilities(
-        (await workspace.readTask(input.taskId).catch(() => undefined))?.capabilities
-      );
-      const baseTools = input.toolFactory
-        ? input.toolFactory(workingDirectory, join(input.workspaceRoot, input.taskId))
-        : createBuiltinTools({
-            rootDirectory: workingDirectory,
-            workspaceDirectory: join(input.workspaceRoot, input.taskId),
-            projectDirectory: input.projectDirectory,
-            capabilities,
-            supportsImages,
-            visionModel: input.visionModel,
-            web: input.web,
-            science: input.science
-          });
-      const tools = new Map(baseTools);
-      if (skills.length > 0) tools.set("load_skill", createLoadSkillTool(skills));
-      tools.set(
-        "send_peer_message",
-        this.createPeerMessageTool({
-          taskId: input.taskId,
-          runId: input.runId,
-          workspaceRoot: input.workspaceRoot,
-          senderCallId: callId
-        })
-      );
-      // Only an async delegation can be answered: a sync call holds Main's turn
-      // inside call_subagent, so a question raised there could never reach it.
-      const questionTimeoutMs = input.questionTimeoutMs ?? configuredSubagentQuestionTimeout();
-      const canAskMain = call.resolvedMode === "async" && questionTimeoutMs > 0;
-      if (canAskMain) {
-        tools.set(
-          "ask_main",
-          this.createAskMainTool({
-            input,
-            callId,
-            events,
-            scheduler,
-            timeoutMs: questionTimeoutMs,
-            maxQuestions: input.maxQuestions ?? configuredSubagentMaxQuestions()
+            senderCallId: callId
           })
         );
-      }
-      if (provided) addCapabilityTools(tools, provided.tools);
-      // A classifier's restriction is authoritative over factories, skills,
-      // delegated capabilities and runtime-added peer/question tools. Persisted
-      // disableTools also keeps recovered async analyses restricted.
-      if (input.disableTools) tools.clear();
-      const projectWrites = input.projectDirectory !== undefined && capabilities.projectWrite;
-      session = new PiSession({
-        baseUrl: input.baseUrl,
-        apiKey: input.apiKey,
-        model: input.model,
-        thinkingLevel,
-        api,
-        thinkingFormat,
-        supportsReasoningEffort,
-        supportsPromptCacheKey,
-        supportsImages,
-        systemPrompt:
-          input.systemPrompt ??
-          [
-            atriaRoleIdentity("Subagent"),
-            `Your team name is ${agentDisplayName(input.agentId)}. Main and the UI use this stable name to identify your work.`,
-            `Your working directory (read_file/write_file/run_command): ${workingDirectory}. Drafts and scripts: ${join(workingDirectory, "work")}. Candidate outputs: ${join(workingDirectory, "deliverables")}.`,
-            `Shared Task workspace (browse_workspace paths start here): ${join(input.workspaceRoot, input.taskId)}.${input.projectDirectory ? ` The user's project directory is ${input.projectDirectory}.` : ""}`,
-            projectWrites
-              ? `You may edit the user's project directly: relative paths resolve there as well as in your own directory, and run_command runs in the project through a shell, supporting pipes and redirection. Foreground command completion also stops ordinary descendants on Unix; use start_job for persistent background work. Some paths are read-only and a write to one fails with the pattern that protects it — evaluation code, test fixtures, this harness and .git are kept outside the loop so results stay trustworthy. Never work around that by writing those paths from a spawned process; if a task seems to require it, say so instead and explain why.`
-              : "Execute only the task assigned by Main. Your own working directory is the only place where you may modify files; use browse_workspace (read-only) to inspect shared Task state, prior Agent progress and published artifacts before starting when the task depends on them.",
-            ...(projectWrites
-              ? [
-                  "Start long jobs such as training with start_job, then poll their log and state with check_job — a foreground command holds this Agent open for its whole duration."
-                ]
-              : []),
-            canAskMain
-              ? "You can reach Main with ask_main when an ambiguity would change your approach and you cannot settle it from the workspace or the project — which evaluation script is authoritative, which of two incompatible readings of the task is meant, a constraint that turns out to be wrong. It blocks until Main answers or the wait runs out, so ask only when the answer changes what you do, not whenever you are unsure; investigate first, and never ask for something a file or command would tell you. State the assumption you will follow if nobody answers, because an unanswered question continues under it rather than failing. Ask on its own turn, not alongside other tool calls, and put one decision in one question."
-              : call.resolvedMode === "async"
-                ? "There is no way to reach Main during this task. When you hit an ambiguity you cannot resolve from the workspace or the project, choose the most reasonable reading, say plainly in your summary which assumption you made and why, and continue."
-                : "This is a synchronous delegation: Main is waiting inside its own tool call and cannot be reached, so there is no way to ask it anything. When you hit an ambiguity you cannot resolve from the workspace or the project, choose the most reasonable reading, say plainly in your summary which assumption you made and why, and continue.",
-            "You may use send_peer_message to send a short, non-blocking question, correction or finding to another Subagent in this Task when Main has given you its target callId. The message is queued for the peer's next safe turn and does not wait for a reply; include a file or artifact path when that is clearer than copying large content.",
-            "Read the specific brief or source files named by Main with browse_workspace. Put substantial reusable candidate outputs under your own deliverables/. Runtime reports those Task-relative paths to Main without moving them; Main reviews the files and uses existing file/command tools to copy accepted final deliverables into Task artifacts/.",
-            "Return a concise natural-language or simple Markdown summary of the completed work, including the conclusion and useful evidence such as file paths, line numbers, commands or test results.",
-            "Only write a file under deliverables/ when the task produces a substantial report, script or other reusable output; do not create files just to repeat a short message. Keep temporary files and intermediate logs in work/ or logs/ in your own directory. Do not write to Task artifacts/.",
-            "The final response must be the complete conclusion, not progress narration. Do not claim work you did not perform.",
-            ...(input.science?.enabled === true ? [scienceEnvironmentGuidance(input.science)] : []),
-            provided?.prompt ?? "",
-            skillCatalogPrompt(skills)
-          ].join("\n\n"),
-        tools,
-        maxTurns: input.maxTurns ?? 200,
-        maxTokens: input.maxTokens,
-        contextWindow: input.contextWindow,
-        maxLengthContinuations: input.maxLengthContinuations,
-        sampling: input.sampling,
-        compaction: input.compaction,
-        maxToolResponseChars: input.maxToolResponseChars,
-        maxErrorRetries: input.maxErrorRetries,
-        // A delegated model run has no artificial wall-clock deadline by
-        // default. Long artifact tasks (for example PPT generation with
-        // rendering and several review passes) must be allowed to finish.
-        // Callers can still opt into a deadline with timeoutMs; `0` explicitly
-        // means unlimited. Environment-specific defaults are resolved by the
-        // CLI/Pi extension before dispatching this runtime.
-        timeoutMs: input.timeoutMs ?? 0,
-        signal: input.signal,
-        initialMessages: restored?.messages,
-        initialCompaction: restored?.compaction,
-        onCheckpoint: saveCheckpoint,
-        trace: {
-          recorder: new TraceRecorder(tracePath),
-          taskId: input.taskId,
-          runId: input.runId,
-          agentId: input.agentId
-        }
-      });
-      this.activeSubagents.set(callId, { session, cancelRequested: this.cancelRequests.has(callId) });
-      if (this.cancelRequests.has(callId)) session.agent.abort();
-      const deliverMessages = async (): Promise<void> => {
-        const current = this.activeSubagents.get(callId);
-        if (!current) return;
-        const queueItem = (await scheduler.list()).find((candidate) => candidate.stepId === callId);
-        if (queueItem?.status === "cancelled") {
-          current.cancelRequested = true;
-          this.cancelRequests.add(callId);
-          current.session.agent.abort();
-          return;
-        }
-        if (!current.session.agent.state.isStreaming) return;
-        const inbox = new InboxStore(
-          join(
-            input.workspaceRoot,
-            input.taskId,
-            "runs",
-            input.runId,
-            "agents",
-            "subagents",
-            input.agentId,
-            "inbox-store.json"
-          )
-        );
-        for (;;) {
-          const message = await inbox.lease(input.agentId, 60_000, `subagent-${process.pid}`);
-          if (!message) return;
-          try {
-            const payload = message.payload as {
-              message?: unknown;
-              from?: unknown;
-              senderAgentId?: unknown;
-              senderCallId?: unknown;
-            };
-            const text = typeof payload.message === "string" ? payload.message.trim() : "";
-            if (!text) {
-              await inbox.consume(message.messageId);
-              continue;
-            }
-            const peerMessage = message.kind === "peer_message";
-            const senderName =
-              peerMessage && typeof payload.senderAgentId === "string"
-                ? agentDisplayName(payload.senderAgentId)
-                : "Main";
-            const senderLabel =
-              peerMessage && typeof payload.senderCallId === "string"
-                ? [senderName, payload.senderCallId].join(" (") + ")"
-                : senderName;
-            const injected: AgentMessage = {
-              role: "user",
-              content: `[Message from ${senderLabel}]\n${text}\n\nContinue the assigned task with this guidance. Acknowledge or incorporate it in your next response when relevant.`,
-              timestamp: Date.now()
-            };
-            current.session.agent.steer(injected);
-            await inbox.consume(message.messageId);
-            await this.append(
+        // Only an async delegation can be answered: a sync call holds Main's turn
+        // inside call_subagent, so a question raised there could never reach it.
+        const questionTimeoutMs = input.questionTimeoutMs ?? configuredSubagentQuestionTimeout();
+        const canAskMain = call.resolvedMode === "async" && questionTimeoutMs > 0;
+        if (canAskMain) {
+          tools.set(
+            "ask_main",
+            this.createAskMainTool({
+              input,
+              callId,
               events,
-              event(
-                input,
-                callId,
-                peerMessage ? "peer_message.delivered" : "message.delivered",
-                input.agentId,
-                {
-                  messageId: message.messageId,
-                  ...(peerMessage
-                    ? {
-                        senderAgentId: payload.senderAgentId,
-                        senderCallId: payload.senderCallId
-                      }
-                    : {})
-                }
-              )
-            );
-          } catch {
-            // Leave a leased message for InboxStore's expiry/reclaim path.
+              scheduler,
+              timeoutMs: questionTimeoutMs,
+              maxQuestions: input.maxQuestions ?? configuredSubagentMaxQuestions()
+            })
+          );
+        }
+        if (provided) addCapabilityTools(tools, provided.tools);
+        // A classifier's restriction is authoritative over factories, skills,
+        // delegated capabilities and runtime-added peer/question tools. Persisted
+        // disableTools also keeps recovered async analyses restricted.
+        if (input.disableTools) tools.clear();
+        const projectWrites = input.projectDirectory !== undefined && capabilities.projectWrite;
+        session = new PiSession({
+          baseUrl: input.baseUrl!,
+          apiKey: input.apiKey!,
+          model: input.model,
+          thinkingLevel,
+          api,
+          thinkingFormat,
+          supportsReasoningEffort,
+          supportsPromptCacheKey,
+          supportsImages,
+          systemPrompt:
+            input.systemPrompt ??
+            [
+              atriaRoleIdentity("Subagent"),
+              `Your team name is ${agentDisplayName(input.agentId)}. Main and the UI use this stable name to identify your work.`,
+              `Your working directory (read_file/write_file/run_command): ${workingDirectory}. Drafts and scripts: ${join(workingDirectory, "work")}. Candidate outputs: ${join(workingDirectory, "deliverables")}.`,
+              `Shared Task workspace (browse_workspace paths start here): ${join(input.workspaceRoot, input.taskId)}.${input.projectDirectory ? ` The user's project directory is ${input.projectDirectory}.` : ""}`,
+              projectWrites
+                ? `You may edit the user's project directly: relative paths resolve there as well as in your own directory, and run_command runs in the project through a shell, supporting pipes and redirection. Foreground command completion also stops ordinary descendants on Unix; use start_job for persistent background work. Some paths are read-only and a write to one fails with the pattern that protects it — evaluation code, test fixtures, this harness and .git are kept outside the loop so results stay trustworthy. Never work around that by writing those paths from a spawned process; if a task seems to require it, say so instead and explain why.`
+                : "Execute only the task assigned by Main. Your own working directory is the only place where you may modify files; use browse_workspace (read-only) to inspect shared Task state, prior Agent progress and published artifacts before starting when the task depends on them.",
+              ...(projectWrites
+                ? [
+                    "Start long jobs such as training with start_job, then poll their log and state with check_job — a foreground command holds this Agent open for its whole duration."
+                  ]
+                : []),
+              canAskMain
+                ? "You can reach Main with ask_main when an ambiguity would change your approach and you cannot settle it from the workspace or the project — which evaluation script is authoritative, which of two incompatible readings of the task is meant, a constraint that turns out to be wrong. It blocks until Main answers or the wait runs out, so ask only when the answer changes what you do, not whenever you are unsure; investigate first, and never ask for something a file or command would tell you. State the assumption you will follow if nobody answers, because an unanswered question continues under it rather than failing. Ask on its own turn, not alongside other tool calls, and put one decision in one question."
+                : call.resolvedMode === "async"
+                  ? "There is no way to reach Main during this task. When you hit an ambiguity you cannot resolve from the workspace or the project, choose the most reasonable reading, say plainly in your summary which assumption you made and why, and continue."
+                  : "This is a synchronous delegation: Main is waiting inside its own tool call and cannot be reached, so there is no way to ask it anything. When you hit an ambiguity you cannot resolve from the workspace or the project, choose the most reasonable reading, say plainly in your summary which assumption you made and why, and continue.",
+              "You may use send_peer_message to send a short, non-blocking question, correction or finding to another Subagent in this Task when Main has given you its target callId. The message is queued for the peer's next safe turn and does not wait for a reply; include a file or artifact path when that is clearer than copying large content.",
+              "Read the specific brief or source files named by Main with browse_workspace. Put substantial reusable candidate outputs under your own deliverables/. Runtime reports those Task-relative paths to Main without moving them; Main reviews the files and uses existing file/command tools to copy accepted final deliverables into Task artifacts/.",
+              "Return a concise natural-language or simple Markdown summary of the completed work, including the conclusion and useful evidence such as file paths, line numbers, commands or test results.",
+              "Only write a file under deliverables/ when the task produces a substantial report, script or other reusable output; do not create files just to repeat a short message. Keep temporary files and intermediate logs in work/ or logs/ in your own directory. Do not write to Task artifacts/.",
+              "The final response must be the complete conclusion, not progress narration. Do not claim work you did not perform.",
+              ...(input.science?.enabled === true ? [scienceEnvironmentGuidance(input.science)] : []),
+              provided?.prompt ?? "",
+              skillCatalogPrompt(skills)
+            ].join("\n\n"),
+          tools,
+          maxTurns: input.maxTurns ?? 200,
+          maxTokens: input.maxTokens,
+          contextWindow: input.contextWindow,
+          maxLengthContinuations: input.maxLengthContinuations,
+          sampling: input.sampling,
+          compaction: input.compaction,
+          maxToolResponseChars: input.maxToolResponseChars,
+          maxErrorRetries: input.maxErrorRetries,
+          // A delegated model run has no artificial wall-clock deadline by
+          // default. Long artifact tasks (for example PPT generation with
+          // rendering and several review passes) must be allowed to finish.
+          // Callers can still opt into a deadline with timeoutMs; `0` explicitly
+          // means unlimited. Environment-specific defaults are resolved by the
+          // CLI/Pi extension before dispatching this runtime.
+          timeoutMs: input.timeoutMs ?? 0,
+          signal: input.signal,
+          initialMessages: restored?.messages,
+          initialCompaction: restored?.compaction,
+          onCheckpoint: saveCheckpoint,
+          trace: {
+            recorder: new TraceRecorder(tracePath),
+            taskId: input.taskId,
+            runId: input.runId,
+            agentId: input.agentId
+          }
+        });
+        this.activeSubagents.set(callId, { session, cancelRequested: this.cancelRequests.has(callId) });
+        if (this.cancelRequests.has(callId)) session.agent.abort();
+        const deliverMessages = async (): Promise<void> => {
+          const current = this.activeSubagents.get(callId);
+          if (!current) return;
+          const queueItem = (await scheduler.list()).find((candidate) => candidate.stepId === callId);
+          if (queueItem?.status === "cancelled") {
+            current.cancelRequested = true;
+            this.cancelRequests.add(callId);
+            current.session.agent.abort();
             return;
           }
-        }
-      };
-      messagePoller = setInterval(() => {
+          if (!current.session.agent.state.isStreaming) return;
+          const inbox = new InboxStore(
+            join(
+              input.workspaceRoot,
+              input.taskId,
+              "runs",
+              input.runId,
+              "agents",
+              "subagents",
+              input.agentId,
+              "inbox-store.json"
+            )
+          );
+          for (;;) {
+            const message = await inbox.lease(input.agentId, 60_000, `subagent-${process.pid}`);
+            if (!message) return;
+            try {
+              const payload = message.payload as {
+                message?: unknown;
+                from?: unknown;
+                senderAgentId?: unknown;
+                senderCallId?: unknown;
+              };
+              const text = typeof payload.message === "string" ? payload.message.trim() : "";
+              if (!text) {
+                await inbox.consume(message.messageId);
+                continue;
+              }
+              const peerMessage = message.kind === "peer_message";
+              const senderName =
+                peerMessage && typeof payload.senderAgentId === "string"
+                  ? agentDisplayName(payload.senderAgentId)
+                  : "Main";
+              const senderLabel =
+                peerMessage && typeof payload.senderCallId === "string"
+                  ? [senderName, payload.senderCallId].join(" (") + ")"
+                  : senderName;
+              const injected: AgentMessage = {
+                role: "user",
+                content: `[Message from ${senderLabel}]\n${text}\n\nContinue the assigned task with this guidance. Acknowledge or incorporate it in your next response when relevant.`,
+                timestamp: Date.now()
+              };
+              current.session.agent.steer(injected);
+              await inbox.consume(message.messageId);
+              await this.append(
+                events,
+                event(
+                  input,
+                  callId,
+                  peerMessage ? "peer_message.delivered" : "message.delivered",
+                  input.agentId,
+                  {
+                    messageId: message.messageId,
+                    ...(peerMessage
+                      ? {
+                          senderAgentId: payload.senderAgentId,
+                          senderCallId: payload.senderCallId
+                        }
+                      : {})
+                  }
+                )
+              );
+            } catch {
+              // Leave a leased message for InboxStore's expiry/reclaim path.
+              return;
+            }
+          }
+        };
+        messagePoller = setInterval(() => {
+          void deliverMessages().catch(() => {});
+        }, 1_000);
         void deliverMessages().catch(() => {});
-      }, 1_000);
-      void deliverMessages().catch(() => {});
-      const result = (sessionResult = await session.run(
-        [
-          `Main 分配的任务：${input.task}`,
-          `Main 的相关上下文（仅作背景，不要当作已验证事实）：${JSON.stringify(contextSummary(input.context))}`,
-          "完成后请返回完整结论；如果创建了 deliverables/ 文件，请列出路径。证据直接写在总结中；不要返回‘正在处理’之类的过程叙述，也不要声称没有执行过的操作。"
-        ].join("\n"),
-        { resume: shouldResume }
-      ));
-      const rawResponse = result.assistant ? contentText(result.assistant.content).trim() : "";
-      await saveSessionResult(join(input.workspaceRoot, input.taskId, diagnostics.resultPath), result);
-      outputFiles = await listAgentOutputFiles(input);
-      if (this.cancelRequests.has(callId) || this.activeSubagents.get(callId)?.cancelRequested) {
-        throw new SubagentTerminationError("cancelled", "Subagent was cancelled by Main");
-      }
-      if (result.termination !== "completed") {
-        throw new SubagentTerminationError(
-          result.termination,
-          result.error
-            ? `Model request failed: ${result.error}`
-            : `Subagent ${result.termination} before returning a complete summary`
-        );
-      }
-      if (!rawResponse) {
-        throw new SubagentTerminationError("aborted", "Subagent completed without a textual summary");
+        const result = (sessionResult = await session.run(
+          [
+            `Main 分配的任务：${input.task}`,
+            `Main 的相关上下文（仅作背景，不要当作已验证事实）：${JSON.stringify(contextSummary(input.context))}`,
+            "完成后请返回完整结论；如果创建了 deliverables/ 文件，请列出路径。证据直接写在总结中；不要返回‘正在处理’之类的过程叙述，也不要声称没有执行过的操作。"
+          ].join("\n"),
+          { resume: shouldResume }
+        ));
+        rawResponse = result.assistant ? contentText(result.assistant.content).trim() : "";
+        await saveSessionResult(join(input.workspaceRoot, input.taskId, diagnostics.resultPath), result);
+        outputFiles = await listAgentOutputFiles(input);
+        if (this.cancelRequests.has(callId) || this.activeSubagents.get(callId)?.cancelRequested) {
+          throw new SubagentTerminationError("cancelled", "Subagent was cancelled by Main");
+        }
+        if (result.termination !== "completed") {
+          throw new SubagentTerminationError(
+            result.termination,
+            result.error
+              ? `Model request failed: ${result.error}`
+              : `Subagent ${result.termination} before returning a complete summary`
+          );
+        }
+        if (!rawResponse) {
+          throw new SubagentTerminationError("aborted", "Subagent completed without a textual summary");
+        }
       }
       const response = formatSubagentSummary({ status: "succeeded", rawResponse, outputFiles, diagnostics });
-      await saveCheckpoint({ messages: result.messages, compaction: result.compaction, status: "succeeded" });
+      if (sessionResult)
+        await saveCheckpoint({
+          messages: sessionResult.messages,
+          compaction: sessionResult.compaction,
+          status: "succeeded"
+        });
       await this.transition(events, input, call, "succeeded");
       // A question this Agent never got an answer to can never be answered now,
       // and a pending one counts as outstanding work — so closing it here is
@@ -1029,7 +1125,16 @@ export class CoordinatorRuntime {
       // Settle the ledger before the callback so Main wakes to a current row.
       await this.settleExperimentRun(input, "succeeded", workingDirectory, rawResponse, outputFiles);
       if (call.resolvedMode === "async") {
-        await this.writeMainCallback(input, call, response, outputFiles, diagnostics, "succeeded");
+        await this.writeMainCallback(
+          input,
+          call,
+          response,
+          outputFiles,
+          diagnostics,
+          "succeeded",
+          undefined,
+          backendResult
+        );
       }
       await scheduler.complete(callId, leaseToken);
       clearInterval(messagePoller);
@@ -1052,6 +1157,7 @@ export class CoordinatorRuntime {
         agentId: input.agentId,
         name: agentDisplayName(input.agentId),
         status: "succeeded",
+        backendResult,
         response,
         workingDirectory,
         artifacts,
@@ -1064,27 +1170,41 @@ export class CoordinatorRuntime {
       const message = error instanceof Error ? error.message : String(error);
       const termination = error instanceof SubagentTerminationError ? error.termination : undefined;
       const cancelled =
-        input.signal?.aborted ||
-        termination === "cancelled" ||
-        this.cancelRequests.has(callId) ||
-        this.activeSubagents.get(callId)?.cancelRequested;
+        !external &&
+        (input.signal?.aborted ||
+          termination === "cancelled" ||
+          this.cancelRequests.has(callId) ||
+          this.activeSubagents.get(callId)?.cancelRequested);
       const state = cancelled ? "cancelled" : termination === "timed_out" ? "timed_out" : "failed";
       // An interrupted provider/tool run can still have useful candidate files.
       // Keep them discoverable even when no final assistant message was returned.
       outputFiles = await listAgentOutputFiles(input).catch(() => outputFiles);
-      await saveSessionResult(join(input.workspaceRoot, input.taskId, diagnostics.resultPath), {
-        messages: sessionResult?.messages ?? session?.agent.state.messages ?? [],
-        assistant: sessionResult?.assistant,
-        termination: sessionResult?.termination ?? state,
-        lastStopReason: sessionResult?.lastStopReason,
-        continuations: sessionResult?.continuations,
-        error: message
-      }).catch(() => {
-        /* Preserve the original execution failure if diagnostics cannot be written. */
-      });
+      if (external) {
+        backendResult ??= {
+          status: "unknown",
+          summary: "External backend did not establish an outcome. The task was not replayed.",
+          limitations: [message]
+        };
+        await saveBackendRecord(
+          join(input.workspaceRoot, input.taskId, diagnostics.resultPath),
+          backendResult
+        );
+      } else
+        await saveSessionResult(join(input.workspaceRoot, input.taskId, diagnostics.resultPath), {
+          messages: sessionResult?.messages ?? session?.agent.state.messages ?? [],
+          assistant: sessionResult?.assistant,
+          termination: sessionResult?.termination ?? state,
+          lastStopReason: sessionResult?.lastStopReason,
+          continuations: sessionResult?.continuations,
+          error: message
+        }).catch(() => {
+          /* Preserve the original execution failure if diagnostics cannot be written. */
+        });
       const response = formatSubagentSummary({
         status: state,
-        rawResponse: subagentRecoverySummary(sessionResult?.messages ?? session?.agent.state.messages ?? []),
+        rawResponse: backendResult
+          ? JSON.stringify({ backendId: input.backendId, ...backendResult })
+          : subagentRecoverySummary(sessionResult?.messages ?? session?.agent.state.messages ?? []),
         outputFiles,
         diagnostics,
         error: message
@@ -1131,7 +1251,16 @@ export class CoordinatorRuntime {
           message
         );
         if (call.resolvedMode === "async") {
-          await this.writeMainCallback(input, call, response, outputFiles, diagnostics, state, message);
+          await this.writeMainCallback(
+            input,
+            call,
+            response,
+            outputFiles,
+            diagnostics,
+            state,
+            message,
+            backendResult
+          );
         }
       }
       await this.append(
@@ -1155,6 +1284,7 @@ export class CoordinatorRuntime {
         agentId: input.agentId,
         name: agentDisplayName(input.agentId),
         status: state,
+        backendResult,
         response,
         workingDirectory,
         artifacts,
@@ -1476,7 +1606,8 @@ export class CoordinatorRuntime {
     outputFiles: string[],
     diagnostics: NonNullable<SubagentDispatchResult["diagnostics"]>,
     status: SubagentDispatchResult["status"],
-    error?: string
+    error?: string,
+    backendResult?: NativeAgentResult
   ): Promise<void> {
     const inboxPath = join(
       input.workspaceRoot,
@@ -1502,6 +1633,7 @@ export class CoordinatorRuntime {
       state: "ready",
       payload: {
         ...input.callbackMetadata,
+        ...(backendResult ? { backendId: input.backendId, backendResult } : {}),
         callId: call.callId,
         agentId: input.agentId,
         name: agentDisplayName(input.agentId),
@@ -1678,4 +1810,9 @@ function formatSubagentSummary(input: {
   );
   if (input.error) metadata.push(`error=${input.error}`);
   return `${body}\n\n${metadata.join("\n")}`;
+}
+
+function isNativeWork(payload: unknown): boolean {
+  const backendId = (payload as { backendId?: string } | undefined)?.backendId;
+  return Boolean(backendId && backendId !== "pi");
 }
