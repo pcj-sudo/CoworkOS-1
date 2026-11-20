@@ -1,5 +1,6 @@
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
+import type { AgentObservation } from "./subagent-backend.js";
 
 export interface TrajectoryEntry {
   id: string;
@@ -40,6 +41,10 @@ interface TraceRecord {
   occurredAt?: string;
   timestamp?: string;
   eventId?: string;
+  entry?: AgentObservation;
+  summary?: string;
+  status?: string;
+  limitations?: string[];
   toolCallId?: string;
   toolName?: string;
   args?: unknown;
@@ -57,6 +62,57 @@ function consume(cache: TraceCache, record: TraceRecord): void {
     cache.total++;
     if (cache.entries.length > 120) cache.entries.shift();
   };
+  if (record.type === "backend.observation" && record.payload?.entry) {
+    const entry = record.payload.entry;
+    if (
+      !entry.id ||
+      !["tool", "message", "state"].includes(entry.kind) ||
+      !["running", "completed", "failed"].includes(entry.status)
+    )
+      return;
+    const previous = cache.entries.find((item) => item.id === entry.id);
+    const normalized: TrajectoryEntry = {
+      ...entry,
+      title: clip(entry.title, 160),
+      text: clip(entry.text),
+      result: entry.result === undefined ? undefined : clip(entry.result),
+      time: entry.time || time
+    };
+    if (previous) Object.assign(previous, normalized, { text: normalized.text || previous.text });
+    else add(normalized);
+    return;
+  }
+  if (record.type === "backend.progress") {
+    add({
+      id,
+      kind: "state",
+      title: "原生执行状态",
+      text: clip((record.payload as { message?: unknown })?.message),
+      time,
+      status: "completed"
+    });
+    return;
+  }
+  if (record.type === "backend.result") {
+    // Tool completion does not prove an unavailable native output was inspected.
+    for (const entry of cache.entries)
+      if (entry.status === "running") {
+        entry.kind = "state";
+        entry.title += "（结果未观察到）";
+        entry.status = "completed";
+        entry.result = "原生执行已结束，未收到该工具的结束事件。";
+      }
+    add({
+      id,
+      kind: "message",
+      title: "原生智能体结果",
+      text: clip(record.payload?.summary),
+      result: record.payload?.limitations?.join("\n"),
+      time,
+      status: record.payload?.status === "completed" ? "completed" : "failed"
+    });
+    return;
+  }
   if (event.type === "tool_execution_start" || event.type === "tool_execution_end") {
     const previous =
       event.toolCallId &&

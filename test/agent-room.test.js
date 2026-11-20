@@ -13,6 +13,32 @@ import {
 import { readAgentTrajectory } from "../dist/src/runtime/agent-trajectory.js";
 import { agentDisplayName, reserveSubagentIdentity } from "../dist/src/runtime/agent-identity.js";
 import { renderRunOverview } from "../web/assets/run-overview.js";
+import { agentBackend, agentMemberLabel, agentObservationSummary } from "../web/assets/agent-backend.js";
+
+test("backend identity distinguishes native members without replacing their stable names", () => {
+  const detail = {
+    coordination: { calls: [{ callId: "a", agentId: "subagent_1" }] },
+    progress: {
+      agents: [{ callId: "a", agentId: "subagent_1", backendId: "hermes", backendName: "Hermes Agent" }]
+    }
+  };
+  const member = teamMembers(detail)[1];
+  assert.equal(agentName(member), "Ara");
+  assert.deepEqual(agentBackend(member), { id: "hermes", name: "Hermes" });
+  assert.deepEqual(agentBackend({ agentId: "legacy" }), { id: "pi", name: "Pi" });
+  const markup = agentMemberLabel(member, "Ara", "工作中");
+  assert.match(markup, /agent-backend-icon/);
+  assert.match(markup, /Hermes/);
+  const summary = agentObservationSummary({
+    ...member,
+    nativeRef: { runId: "<run>" },
+    lastTool: "read_file",
+    backendStatus: "unknown"
+  });
+  assert.match(summary, /&lt;run&gt;/);
+  assert.match(summary, /read_file/);
+  assert.match(summary, /未知/);
+});
 
 test("agent names remain unique through concurrent delegation, follow-ups and reordered cards", async () => {
   const root = await mkdtemp(join(tmpdir(), "atria-agent-names-"));

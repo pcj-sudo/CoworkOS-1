@@ -185,6 +185,8 @@ These checks enforce execution and delivery state. Main remains responsible for 
 
 `coordination.calls` is the structured Agent Office state. A UI should use its `status`, `agentId`, `task`, `response`, and `error` fields to drive the agent card; it should not infer state from animation timers.
 
+`progress.agents` additionally exposes optional `backendId`, `backendName`, `nativeRef`, `backendStatus`, `backendSummary` and `backendLimitations` for external members. Missing backend IDs retain the original Pi meaning. `/agents/:agentId/trajectory` folds the optional persisted native tool/state observations and final report into the same bounded entry format as Pi. Native completion and previews are observations, not proof of full native tool output or accepted artifacts.
+
 Calls, progress entries, delegation results, and callbacks also include `name`, a stable human-readable team name derived from the durable Agent identity. Use `name` on cards, activity records, and result attribution; retain `agentId` and `callId` for API routing.
 
 New delegations atomically reserve distinct private directories, including across completed requests in the same Task.

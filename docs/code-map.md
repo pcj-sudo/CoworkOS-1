@@ -373,4 +373,6 @@ App/Web 界面语言由 [轻量文案模块](../web/assets/ui/language.js)、[�
 
 [Hermes 适配器](../src/runtime/subagent-backends/hermes.ts) 通过原生 Runs API 执行，[配置装配](../src/runtime/subagent-backends/configured.ts) 由 Pi 入口调用；[安装与限制](hermes-subagent.md)、[协议回归](../test/hermes-backend.test.js) 和 [真实运行时回归](../test/hermes-native.test.js) 分别维护。
 
+原生可观测性通过 [Hermes 事件订阅](../src/runtime/subagent-backends/hermes-events.ts)、Backend 可选 observation 回调、[进度快照](../src/runtime/progress.ts) 与 [轨迹折叠](../src/runtime/agent-trajectory.ts) 复用现有事件链路；[成员类型展示](../web/assets/agent-backend.js) 供成员列表、星图和详情共用。验证 [事件退化与清理](../test/hermes-events.test.js)、[成员与轨迹](../test/agent-room.test.js) 和 [浏览器运行/刷新](../e2e/hermes-observability.spec.js)。
+
 桌面可按用户数据目录中的 `hermes-runtime.json` 启停独立安装的本机 Hermes；进程所有权、API 就绪与连接注入归 [桌面生命周期](../desktop/hermes-runtime.cjs)，不扩展 Backend 最小合同。验证 [启停与失败清理](../test/desktop-hermes-runtime.test.js) 和 [后端连接环境](../test/desktop-backend.test.js)。

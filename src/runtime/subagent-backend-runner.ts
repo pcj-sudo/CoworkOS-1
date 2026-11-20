@@ -1,6 +1,12 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import type { AgentBackend, AgentResult, AgentTask, NativeReference } from "./subagent-backend.js";
+import type {
+  AgentBackend,
+  AgentObservation,
+  AgentResult,
+  AgentTask,
+  NativeReference
+} from "./subagent-backend.js";
 
 /** Validate adapter output at the native boundary; never infer success from arbitrary text. */
 export function validateAgentResult(value: unknown): AgentResult {
@@ -59,6 +65,7 @@ export async function runNativeBackend(input: {
   referencePath: string;
   resultPath: string;
   onProgress: (message: string) => Promise<void>;
+  onObservation?: (entry: AgentObservation) => Promise<void>;
 }): Promise<AgentResult> {
   if (input.interrupted) {
     try {
@@ -85,6 +92,7 @@ export async function runNativeBackend(input: {
   return validateAgentResult(
     await input.backend.run(input.task, {
       onProgress: input.onProgress,
+      onObservation: input.onObservation,
       onReference: async (reference) => {
         validateReference(reference);
         await saveBackendRecord(input.referencePath, reference);

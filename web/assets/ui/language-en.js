@@ -1,5 +1,11 @@
 // Shared App/Web chrome. User content is never passed through this catalog.
 export default {
+  最近工具: "Latest tool",
+  原生执行标识: "Native execution reference",
+  原生结果: "Native result",
+  观察范围: "Observation scope",
+  "原生事件观察：工具预览与状态；完整输出以原生客户端为准。":
+    "Native event observations include tool previews and status; consult the native client for full output.",
   已创建: "Created",
   空闲中: "Idle",
   工作中: "Working",

@@ -39,6 +39,12 @@ import { createConversationReadState, conversationTaskId } from "./assets/conver
 import { renderMarkdown } from "./assets/markdown.js";
 import { mergeRuntimeEvents } from "./assets/conversation.js";
 import { agentName, galaxyMembers, isWorking } from "./assets/agent-room.js";
+import {
+  agentBackend,
+  agentBackendIcon,
+  agentMemberLabel,
+  agentObservationSummary
+} from "./assets/agent-backend.js";
 import { createAgentGalaxy } from "./assets/agent-galaxy.js";
 import { renderRunOverview, runElapsed, formatRunDuration } from "./assets/run-overview.js";
 import { createHumanQuestions } from "./assets/human-questions.js";
@@ -870,7 +876,7 @@ function renderAgentRoom(coordination = {}, task = {}, progress) {
   const chipMarkup = members
     .map(
       (member) =>
-        `<button class="member-chip ${agentKey(member) === state.selectedAgent ? "active" : ""}" aria-pressed="${agentKey(member) === state.selectedAgent}" data-agent="${esc(agentKey(member))}">${esc(agentName(member, member.index))}<small>${esc(member.__main ? ui("主智能体") : stateText(member.status))}</small></button>`
+        `<button class="member-chip ${agentKey(member) === state.selectedAgent ? "active" : ""}" aria-pressed="${agentKey(member) === state.selectedAgent}" data-agent="${esc(agentKey(member))}">${agentMemberLabel(member, agentName(member), member.__main ? ui("主智能体") : stateText(member.status))}</button>`
     )
     .join("");
   if (chips.innerHTML !== chipMarkup) {
@@ -901,8 +907,17 @@ function renderFocus(agent) {
     root.dataset.member = key;
     root.innerHTML = '<div id="trace-identity"></div><div id="agent-trajectory"></div>';
   }
-  const identity = `<div class="trace-heading"><div class="trace-title"><span class="trace-avatar">${agent.__main ? '<img src="/assets/atria-symbol.png" alt="" />' : '<svg class="ui-icon"><use href="#i-team"/></svg>'}</span><div><strong>${esc(agentName(agent, agent.index))}</strong></div></div><span>${esc(stateText(agent.status))}</span></div><p class="trace-task">${esc(agent.task || ui("等待分派任务"))}</p>`;
-  if ($("#trace-identity").innerHTML !== identity) $("#trace-identity").innerHTML = identity;
+  const identity = `<div class="trace-heading"><div class="trace-title"><span class="trace-avatar">${agentBackendIcon(agent)}</span><div><strong>${esc(agentName(agent))}</strong><small>${esc(agent.__main ? ui("主智能体") : agentBackend(agent).name)}</small></div></div><span>${esc(stateText(agent.status))}</span></div><p class="trace-task">${esc(agent.task || ui("等待分派任务"))}</p>${agentObservationSummary(agent)}`;
+  const identityRoot = $("#trace-identity");
+  if (identityRoot.dataset.signature !== identity) {
+    const opened = new Set(
+      [...identityRoot.querySelectorAll("details[open]")].map((node) => node.dataset.nativeDetail)
+    );
+    identityRoot.innerHTML = identity;
+    identityRoot.dataset.signature = identity;
+    for (const node of identityRoot.querySelectorAll("details"))
+      node.open = opened.has(node.dataset.nativeDetail);
+  }
   if (!state.selected || !state.detail?.task?.activeRunId) {
     paintTrajectory({ entries: [], total: 0 });
     return;

@@ -156,6 +156,21 @@
   font-weight: 500;
   letter-spacing: normal;
 }
+.star-backend {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 4px;
+  color: light-dark(#59616d, #b8c1ce);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.star-backend .agent-backend-icon {
+  width: 13px;
+  height: 13px;
+  font-size: 9px;
+  border-radius: 3px;
+}
 .galaxy-star-main .star-label strong {
   color: #e6ecf3;
   font-size: 14px;

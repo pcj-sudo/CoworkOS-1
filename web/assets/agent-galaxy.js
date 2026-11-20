@@ -1,4 +1,5 @@
 import { createOrbitLayout, isWorking } from "./agent-room.js";
+import { agentBackend, agentBackendIcon } from "./agent-backend.js";
 import {
   createGalaxyPainter,
   DEFAULT_GALAXY_VIEW,
@@ -121,7 +122,7 @@ export function createAgentGalaxy(root, { onSelect, nameFor, stateFor, keyFor })
       (a, b) => Number(b.main) - Number(a.main) || Number(b.highlight) - Number(a.highlight)
     )) {
       const w = main ? 116 : Math.max(66, Math.min(112, node.name.textContent.length * 7 + 14));
-      const h = 24;
+      const h = 41;
       const distance = main ? 41 : 30;
       const offsets = [
         [0, distance],
@@ -280,7 +281,8 @@ export function createAgentGalaxy(root, { onSelect, nameFor, stateFor, keyFor })
         button.type = "button";
         button.className = `galaxy-star galaxy-star-${main ? "main" : "satellite"}`;
         button.dataset.agent = key;
-        button.innerHTML = '<span class="star-label"><strong></strong></span>';
+        button.innerHTML =
+          '<span class="star-label"><strong></strong><span class="star-backend"></span></span>';
         button.addEventListener("click", () => onSelect(key));
         button.addEventListener("pointerenter", () => {
           hovered = key;
@@ -314,8 +316,16 @@ export function createAgentGalaxy(root, { onSelect, nameFor, stateFor, keyFor })
       node.button.classList.toggle("selected", selected === key);
       node.button.setAttribute("aria-pressed", String(selected === key));
       node.button.setAttribute("aria-label", `查看 ${name} 的执行轨迹`);
-      node.button.setAttribute("aria-description", `${main ? "主智能体 · " : ""}${status}`);
-      node.button.title = name;
+      const backend = agentBackend(member);
+      node.button.setAttribute("aria-description", `${backend.name} · ${main ? "主智能体 · " : ""}${status}`);
+      node.button.title = `${name} · ${backend.name}`;
+      const backendLabel = node.button.querySelector(".star-backend");
+      const backendMarkup = `${agentBackendIcon(member)}<span></span>`;
+      if (backendLabel.dataset.backend !== backend.id) {
+        backendLabel.innerHTML = backendMarkup;
+        backendLabel.lastElementChild.textContent = main ? "Main" : backend.name;
+        backendLabel.dataset.backend = backend.id;
+      }
       if (node.name.textContent !== name) node.name.textContent = name;
     }
     root.querySelector(".galaxy-count").textContent =

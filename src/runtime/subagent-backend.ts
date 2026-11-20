@@ -29,6 +29,17 @@ export interface AgentArtifact {
 /** OPTIONAL non-secret native task/session identifiers; format is adapter-owned. */
 export type NativeReference = Record<string, string>;
 
+/** Optional, bounded native observations; no full-trace or tool-result guarantee. */
+export interface AgentObservation {
+  id: string;
+  kind: "tool" | "message" | "state";
+  title: string;
+  text: string;
+  status: "running" | "completed" | "failed";
+  time?: string;
+  result?: string;
+}
+
 export interface AgentResult {
   // REQUIRED. completed = this delegation returned a usable report, not business acceptance.
   // failed = this delegation could not deliver; unknown = unable to establish its outcome.
@@ -46,6 +57,7 @@ export interface AgentResult {
  */
 export interface AgentRunContext {
   onProgress?: (message: string) => void | Promise<void>;
+  onObservation?: (entry: AgentObservation) => void | Promise<void>;
   // Persist a non-secret native ID early if available; does not promise recovery.
   onReference?: (reference: NativeReference) => void | Promise<void>;
   // Available only when Main can handle the interaction (RFC R-01/R-02).

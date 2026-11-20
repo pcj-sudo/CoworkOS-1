@@ -771,6 +771,7 @@ export class CoordinatorRuntime {
       payload: {
         task: input.task,
         backendId: input.backendId,
+        backendName: backend?.name,
         experimentRef: input.experimentRef,
         activateRun: input.activateRun,
         projectDirectory: input.projectDirectory,
@@ -849,6 +850,11 @@ export class CoordinatorRuntime {
             const progress = event(input, callId, "backend.progress", input.agentId, { message });
             await this.append(events, progress);
             await new JsonlEventStore(tracePath).append(progress);
+          },
+          onObservation: async (entry) => {
+            const observation = event(input, callId, "backend.observation", input.agentId, { entry });
+            await this.append(events, observation);
+            await new JsonlEventStore(tracePath).append(observation);
           }
         });
         await saveBackendRecord(

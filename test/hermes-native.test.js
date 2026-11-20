@@ -9,6 +9,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { HermesBackend } from "../dist/src/runtime/subagent-backends/hermes.js";
 import { CoordinatorRuntime } from "../dist/src/runtime/coordinator-runtime.js";
 import { InboxStore } from "../dist/src/runtime/scheduler.js";
+import { readAgentTrajectory } from "../dist/src/runtime/agent-trajectory.js";
 import { protocolStream } from "./model-protocol-fixture.mjs";
 
 test(
@@ -198,6 +199,13 @@ test(
       "Hermes executed a tool and sent its receipt to the model"
     );
     assert.match(result.response, /Native file verified/);
+    const trajectory = await readAgentTrajectory(join(root, "cowork/task", result.diagnostics.tracePath));
+    assert.ok(
+      trajectory.entries.some(
+        (entry) => entry.kind === "tool" && entry.title === "write_file" && entry.status === "completed"
+      ),
+      `Installed Hermes should emit native tool lifecycle: ${JSON.stringify(trajectory)}`
+    );
     const callbacks = await new InboxStore(
       join(root, "cowork/task/runs/run/agents/main/inbox-store.json")
     ).list("main");

@@ -1,4 +1,5 @@
 import { setTimeout as delay } from "node:timers/promises";
+import { observeHermesEvents } from "./hermes-events.js";
 import type {
   AgentBackend,
   AgentResult,
@@ -66,6 +67,8 @@ export class HermesBackend implements AgentBackend {
     if (!task.callId.trim() || !task.task.trim())
       return { status: "failed", summary: "Hermes requires a callId and nonempty task" };
     let nativeRef: NativeReference | undefined;
+    const observationController = new AbortController();
+    let observation: Promise<void> | undefined;
     const deadline = Date.now() + this.observationTimeoutMs;
     try {
       // Never retry POST: older Hermes releases do not deduplicate Runs creation.
@@ -87,6 +90,21 @@ export class HermesBackend implements AgentBackend {
       const runId = receipt.run_id;
       nativeRef = { runId, apiRoot: this.root };
       await context?.onReference?.(nativeRef);
+      if (context?.onObservation) {
+        observation = observeHermesEvents({
+          url: this.root,
+          apiKey: this.options.apiKey,
+          runId,
+          signal: AbortSignal.any([
+            observationController.signal,
+            AbortSignal.timeout(this.observationTimeoutMs)
+          ]),
+          emit: context.onObservation
+        }).catch(async () => {
+          if (!observationController.signal.aborted)
+            await context.onProgress?.("Hermes event stream unavailable; status polling continues.");
+        });
+      }
       let lastProgress = "";
       while (Date.now() < deadline) {
         const response = await this.request(`/v1/runs/${encodeURIComponent(runId)}`);
@@ -99,7 +117,10 @@ export class HermesBackend implements AgentBackend {
         const state = object(await response.json());
         if (state.run_id !== runId || typeof state.status !== "string")
           throw new Error("Mismatched Hermes run status");
-        if (typeof state.session_id === "string") nativeRef.sessionId = state.session_id;
+        if (typeof state.session_id === "string" && state.session_id !== nativeRef.sessionId) {
+          nativeRef.sessionId = state.session_id;
+          await context?.onReference?.(nativeRef);
+        }
         const progress = `${state.status}${typeof state.last_event === "string" ? `: ${state.last_event}` : ""}`;
         if (progress !== lastProgress) {
           await context?.onProgress?.(progress);
@@ -157,6 +178,9 @@ export class HermesBackend implements AgentBackend {
           "Hermes communication or response validation failed. The native run may have been accepted; no automatic resubmission was made.",
         nativeRef
       };
+    } finally {
+      observationController.abort();
+      await observation;
     }
   }
 

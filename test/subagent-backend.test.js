@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { CoordinatorRuntime } from "../dist/src/runtime/coordinator-runtime.js";
 import { DurableScheduler, InboxStore } from "../dist/src/runtime/scheduler.js";
+import { readSubagentProgress } from "../dist/src/runtime/progress.js";
+import { readAgentTrajectory } from "../dist/src/runtime/agent-trajectory.js";
 
 async function fixture(t, backend) {
   const workspaceRoot = await mkdtemp(join(tmpdir(), "cowork-backend-"));
@@ -38,6 +40,21 @@ test("minimal run-only backend executes without Main credentials, reports native
       assert.equal(context.askMain, undefined);
       await context.onReference({ runId: "native-7" });
       await context.onProgress("Native tool completed");
+      await context.onObservation({
+        id: "native-tool-1",
+        kind: "tool",
+        title: "read_file",
+        text: "report.txt",
+        status: "running"
+      });
+      await context.onObservation({
+        id: "native-tool-1",
+        kind: "tool",
+        title: "read_file",
+        text: "",
+        status: "completed",
+        result: "Native reports completion"
+      });
       return {
         status: "completed",
         summary: "Native evidence verified",
@@ -53,6 +70,18 @@ test("minimal run-only backend executes without Main credentials, reports native
   const result = await f.runtime.dispatch(f.input);
   assert.equal(result.status, "succeeded", result.error);
   assert.equal(result.backendResult.nativeRef.runId, "native-7");
+  const progress = (await readSubagentProgress(f.input)).agents[0];
+  assert.equal(progress.backendId, "native");
+  assert.equal(progress.backendName, "Native");
+  assert.equal(progress.nativeRef.runId, "native-7");
+  assert.equal(progress.backendStatus, "completed");
+  assert.equal(progress.lastTool, "read_file");
+  const trace = await readAgentTrajectory(join(f.input.workspaceRoot, "task", result.diagnostics.tracePath));
+  const tool = trace.entries.find((entry) => entry.kind === "tool");
+  assert.equal(tool.title, "read_file");
+  assert.equal(tool.text, "report.txt");
+  assert.equal(tool.status, "completed");
+  assert.ok(trace.entries.some((entry) => entry.title === "原生智能体结果"));
   assert.equal(result.artifacts.length, 0, "native references are not automatically accepted Task artifacts");
   assert.match(result.response, /native-7\/report/);
   const callback = (await f.inbox.list("main"))[0];

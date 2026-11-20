@@ -10,6 +10,12 @@ export interface SubagentProgress {
   agentId: string;
   name: string;
   task: string;
+  backendId?: string;
+  backendName?: string;
+  nativeRef?: Record<string, string>;
+  backendStatus?: string;
+  backendSummary?: string;
+  backendLimitations?: string[];
   mode?: "sync" | "async" | "auto";
   status: "queued" | "running" | "succeeded" | "failed" | "timed_out" | "cancelled" | "unknown";
   updatedAt?: string;
@@ -81,7 +87,7 @@ export async function readSubagentProgress(input: {
       stepId: string;
       agentId: string;
       status: string;
-      payload?: { task?: string };
+      payload?: { task?: string; backendId?: string; backendName?: string };
       createdAt?: string;
       updatedAt?: string;
     }>
@@ -118,6 +124,21 @@ export async function readSubagentProgress(input: {
         const trace = await readTraceSummary(
           join(input.workspaceRoot, input.taskId, "sessions", item.agentId, `${input.runId}.jsonl`)
         );
+        const backendId = item.payload?.backendId ?? "pi";
+        const external = backendId !== "pi";
+        const nativeRef = external
+          ? await readJson<Record<string, string> | undefined>(
+              join(runRoot, "agents", "subagents", item.agentId, "native-reference.json"),
+              undefined
+            )
+          : undefined;
+        const backendResult = external
+          ? await readJson<{
+              status?: string;
+              summary?: string;
+              limitations?: string[];
+            }>(join(runRoot, "agents", "subagents", item.agentId, "result.json"), {})
+          : undefined;
         const terminal = ["completed", "failed", "timed_out", "cancelled"].includes(item.status);
         const elapsedMs = item.createdAt
           ? Math.max(
@@ -131,6 +152,14 @@ export async function readSubagentProgress(input: {
           agentId: item.agentId,
           name: agentDisplayName(item.agentId),
           task: item.payload?.task ?? "",
+          backendId,
+          backendName:
+            item.payload?.backendName ??
+            (backendId === "hermes" ? "Hermes Agent" : backendId === "pi" ? "Pi" : backendId),
+          nativeRef,
+          backendStatus: backendResult?.status,
+          backendSummary: backendResult?.summary,
+          backendLimitations: backendResult?.limitations,
           mode: call?.call?.mode,
           status: normalizeStatus(item.status),
           updatedAt: item.updatedAt,
@@ -302,6 +331,7 @@ async function updateTraceSummary(path: string, cache: TraceSummaryCache): Promi
 
 function consumeTraceSummary(summary: TraceSummary, line: string): void {
   let record: {
+    type?: string;
     occurredAt?: string;
     payload?: {
       type?: unknown;
@@ -316,6 +346,25 @@ function consumeTraceSummary(summary: TraceSummary, line: string): void {
     return;
   }
   const payload = record.payload ?? {};
+  if (record.type === "backend.observation") {
+    const entry = (payload as { entry?: { title?: string; kind?: string; status?: string } }).entry;
+    if (entry?.kind === "tool") summary.lastTool = entry.title;
+    summary.lastActivity = `${entry?.title ?? "native"}: ${entry?.status ?? "observed"}`;
+    return;
+  }
+  if (record.type === "backend.result") {
+    const result = payload as { status?: string; summary?: string };
+    summary.lastActivity = `native:${result.status ?? "unknown"}`;
+    summary.lastAssistantText = result.summary?.slice(-800);
+    return;
+  }
+  if (record.type === "backend.progress") {
+    summary.lastActivity = String((payload as { message?: unknown }).message ?? "native activity").slice(
+      0,
+      800
+    );
+    return;
+  }
   const type = typeof payload.type === "string" ? payload.type : "activity";
   if (type === "turn_start") summary.turns += 1;
   if (type === "message_end") summary.messageCount += 1;

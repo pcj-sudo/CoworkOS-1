@@ -494,6 +494,36 @@ body {
   color: var(--workbench-faint);
   font-size: var(--workbench-type-caption);
 }
+.agent-backend-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  object-fit: contain;
+}
+.agent-type-mark {
+  border: 1px solid currentColor;
+  border-radius: 5px;
+  font:
+    600 12px ui-monospace,
+    monospace;
+}
+.agent-backend-type {
+  color: var(--workbench-secondary);
+  font-size: var(--workbench-type-caption);
+}
+.native-observation {
+  color: var(--workbench-muted);
+  font-size: var(--workbench-type-caption);
+  overflow-wrap: anywhere;
+}
+.native-observation > p {
+  margin: 5px 0;
+}
+.native-observation details {
+  margin: 5px 0;
+}
 .team-trace-details {
   padding: 8px 0 16px;
 }

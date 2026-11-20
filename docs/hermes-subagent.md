@@ -64,7 +64,8 @@ Call the above with `list_subagent_backends`, then:
 ## Supported scope
 
 - Required: text task submission, waiting for the report, attributable completion/failure/unknown, native run reference and persistence in CoworkOS.
-- Available observations: polled native status and `last_event` changes, native run/session identifiers and the final report. Full token/tool trajectories remain in Hermes; this adapter does not consume SSE.
+- Available observations: polled native status and `last_event` changes, native run/session identifiers and the final report. When the host supplies the optional observation callback, a single authenticated Runs SSE subscription also records tool names, native previews, completion/failure and durations in the existing member trajectory. Status polling remains authoritative for the final report. Missing/failed SSE falls back to polling without resubmitting work; the stream is closed when observation ends. Hermes 0.19 supplies no per-call tool ID or full tool output here: local timeline IDs pair same-name tools in observed order, and the UI discloses missing native output. This is partial observability, not a full transcript or verified business acceptance. Text/reasoning deltas are not imported.
+- Team identification: the existing member name remains stable; the member list, galaxy and trace header additionally show the backend type (Hermes, Pi or a configured backend name) and a local type mark. Native task/session IDs and observation limits are expandable in the trace header. Historical calls lacking a backend ID are treated as the original Pi runtime.
 - Optional readiness: authenticated `GET /v1/models`. This proves API access, not model/provider readiness.
 - Not implemented: CoworkOS resource/attachment grants, file upload/download or artifact promotion, native workspace assignment, follow-up/peer messaging, approval/clarification replies, cancel and reconnect/resume. These are not required by the [minimal contract](subagent-backends.md).
 
@@ -77,6 +78,8 @@ The adapter's default observation limit and request/poll settings are constructo
 ```sh
 npm run build:cli
 node --test test/subagent-backend.test.js test/hermes-backend.test.js
+node --test test/hermes-events.test.js test/agent-room.test.js
+npx playwright test e2e/hermes-observability.spec.js --workers=1
 node --test test/desktop-hermes-runtime.test.js test/desktop-backend.test.js
 COWORK_TEST_HERMES_PYTHON=/path/to/independent/hermes-venv/bin/python \
   node --test test/hermes-native.test.js
